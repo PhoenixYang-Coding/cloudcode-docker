@@ -22,7 +22,7 @@ import (
 	"github.com/vkenliu/cloudcode-docker/internal/store"
 )
 
-//go:embed frontend/dist
+//go:embed all:frontend/dist
 var embeddedSPA embed.FS
 
 func main() {

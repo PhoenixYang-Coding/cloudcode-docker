@@ -10,6 +10,7 @@
 # Options:
 #   --token <TOKEN>       Platform access token (default: auto-generated)
 #   --port <PORT>         Host port for the web UI (default: 8080)
+#   --cors-origin <URLS>  Comma-separated allowed browser origins for CloudCode (default: https://adit-cloud.varve.ai)
 #   --data-dir <PATH>     Data directory (default: /opt/cloudcode/data; macOS Docker Desktop: ~/.cloudcode/data)
 #   --install-dir <PATH>  Install directory (default: /opt/cloudcode; macOS Docker Desktop: ~/.cloudcode)
 #   --skip-base-image     Skip building the base image (pull from GHCR instead)
@@ -25,6 +26,7 @@ INSTALL_DIR_SET=false
 DATA_DIR_SET=false
 PORT=8080
 ACCESS_TOKEN=""
+CORS_ORIGIN="https://adit-cloud.varve.ai"
 SKIP_BASE_IMAGE=false
 CHINA_MIRROR=false
 PLATFORM_IMAGE="cloudcode:latest"
@@ -134,6 +136,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --token)        ACCESS_TOKEN="$2"; shift 2 ;;
         --port)         PORT="$2"; shift 2 ;;
+        --cors-origin)  CORS_ORIGIN="$2"; shift 2 ;;
         --data-dir)     DATA_DIR="$2"; DATA_DIR_SET=true; shift 2 ;;
         --install-dir)  INSTALL_DIR="$2"; INSTALL_DIR_SET=true; shift 2 ;;
         --skip-base-image) SKIP_BASE_IMAGE=true; shift ;;
@@ -162,6 +165,7 @@ log "Starting CloudCode installation..."
 info "Install dir : ${INSTALL_DIR}"
 info "Data dir    : ${DATA_DIR}"
 info "Port        : ${PORT}"
+info "CORS origin : ${CORS_ORIGIN:-<none>}"
 info "China mirror: ${CHINA_MIRROR}"
 echo ""
 
@@ -554,6 +558,8 @@ services:
       - /app/cloudcode
       - -addr
       - ":8080"
+      - -cors-origin
+      - "${CORS_ORIGIN}"
       - -data
       - /app/data
       - -access-token
@@ -603,6 +609,7 @@ print_summary() {
     echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  Install Dir:  ${INSTALL_DIR}                                 "
     echo -e "${GREEN}║${NC}  Data Dir:     ${DATA_DIR}                                    "
+    echo -e "${GREEN}║${NC}  CORS Origin:  ${CORS_ORIGIN:-<none>}                        "
     echo -e "${GREEN}║${NC}                                                              ${GREEN}║${NC}"
     echo -e "${GREEN}║${NC}  Manage:                                                     "
     echo -e "${GREEN}║${NC}    cd ${INSTALL_DIR}                                          "

@@ -1754,22 +1754,11 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// If the token was provided as ?token= query param, set the per-instance
 	// token cookie so subsequent requests (assets, WS) don't need it in the URL.
+	// Serve the proxied content directly (instead of 303 redirect) to avoid
+	// cookie loss on redirect — some browsers don't reliably send SameSite=Lax
+	// cookies on 303 redirect chains.
 	if t := r.URL.Query().Get("token"); t != "" {
 		proxy.SetTokenCookie(w, r, id, t)
-		// C3/M1: Use 303 See Other (not 302) so the browser always follows with GET,
-		// preventing any method replay.  Add Referrer-Policy so the token-bearing
-		// URL is not included in the Referer header of the redirected request.
-		// M2: build a clean path+query (no fragment, no scheme/host) explicitly.
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		cleanPath := r.URL.Path
-		q := r.URL.Query()
-		q.Del("token")
-		cleanTarget := cleanPath
-		if encoded := q.Encode(); encoded != "" {
-			cleanTarget += "?" + encoded
-		}
-		http.Redirect(w, r, cleanTarget, http.StatusSeeOther)
-		return
 	}
 
 	h.proxy.ServeHTTP(w, r, id)
@@ -1781,7 +1770,7 @@ func spaSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:")
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:")
 }
 
 const standaloneLoginHTML = `<!DOCTYPE html>

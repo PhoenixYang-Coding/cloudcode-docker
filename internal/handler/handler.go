@@ -1756,6 +1756,7 @@ func (h *Handler) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 // --- Proxy handlers (unchanged) ---
 
 const instanceCookieName = "_cc_inst"
+const instanceRouteQueryParam = "__cc_inst"
 
 func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -1947,14 +1948,35 @@ func (h *Handler) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) resolveInstanceID(r *http.Request) string {
+	if id := r.URL.Query().Get(instanceRouteQueryParam); instanceIDRe.MatchString(id) {
+		return id
+	}
 	if id := extractInstanceIDFromReferer(r); id != "" {
 		return id
+	}
+	// Do not let a stale instance cookie hijack top-level dashboard/admin
+	// navigations after a user has visited an OpenCode container page.
+	if isDocumentNavigation(r) {
+		return ""
 	}
 	// M7: validate the cookie value before using it as an instance ID.
 	if c, err := r.Cookie(instanceCookieName); err == nil && instanceIDRe.MatchString(c.Value) {
 		return c.Value
 	}
 	return ""
+}
+
+func isDocumentNavigation(r *http.Request) bool {
+	if !strings.EqualFold(r.Method, http.MethodGet) {
+		return false
+	}
+	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return false
+	}
+	if strings.EqualFold(r.Header.Get("Sec-Fetch-Dest"), "document") {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 func extractInstanceIDFromReferer(r *http.Request) string {

@@ -1754,22 +1754,11 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	// If the token was provided as ?token= query param, set the per-instance
 	// token cookie so subsequent requests (assets, WS) don't need it in the URL.
+	// Serve the proxied content directly (instead of 303 redirect) to avoid
+	// cookie loss on redirect — some browsers don't reliably send SameSite=Lax
+	// cookies on 303 redirect chains.
 	if t := r.URL.Query().Get("token"); t != "" {
 		proxy.SetTokenCookie(w, r, id, t)
-		// C3/M1: Use 303 See Other (not 302) so the browser always follows with GET,
-		// preventing any method replay.  Add Referrer-Policy so the token-bearing
-		// URL is not included in the Referer header of the redirected request.
-		// M2: build a clean path+query (no fragment, no scheme/host) explicitly.
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		cleanPath := r.URL.Path
-		q := r.URL.Query()
-		q.Del("token")
-		cleanTarget := cleanPath
-		if encoded := q.Encode(); encoded != "" {
-			cleanTarget += "?" + encoded
-		}
-		http.Redirect(w, r, cleanTarget, http.StatusSeeOther)
-		return
 	}
 
 	h.proxy.ServeHTTP(w, r, id)
@@ -1781,7 +1770,67 @@ func spaSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:")
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:")
+}
+
+const standaloneLoginHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloudCode — Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{width:100%;max-width:360px;padding:32px;background:#1e293b;border:1px solid #334155;border-radius:16px;box-shadow:0 25px 50px -12px rgba(0,0,0,.25)}
+h1{font-size:1.5rem;font-weight:700;color:#60a5fa;text-align:center;letter-spacing:-.02em}
+.sub{text-align:center;color:#94a3b8;font-size:.875rem;margin:4px 0 24px}
+label{display:block;font-size:.875rem;font-weight:500;color:#cbd5e1;margin-bottom:6px}
+input[type=password]{width:100%;padding:8px 12px;border-radius:8px;background:#0f172a;border:1px solid #475569;color:#f1f5f9;font-size:.875rem;outline:none;transition:border .15s}
+input[type=password]:focus{border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,.3)}
+button{width:100%;padding:10px;margin-top:20px;border-radius:8px;border:none;background:#2563eb;color:#fff;font-size:.875rem;font-weight:600;cursor:pointer;transition:background .15s}
+button:hover{background:#1d4ed8}
+button:disabled{background:#334155;cursor:not-allowed}
+.err{margin-top:12px;padding:8px 12px;border-radius:8px;background:#7f1d1d;border:1px solid #991b1b;color:#fca5a5;font-size:.8rem;display:none}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>CloudCode</h1>
+<p class="sub">Enter your access token to continue</p>
+<form id="f">
+<label for="t">Access Token</label>
+<input type="password" id="t" placeholder="Paste your access token" required autofocus>
+<button type="submit" id="b">Sign in</button>
+</form>
+<div class="err" id="e"></div>
+</div>
+<script>
+(function(){
+var f=document.getElementById('f'),t=document.getElementById('t'),b=document.getElementById('b'),e=document.getElementById('e');
+f.onsubmit=function(ev){
+ev.preventDefault();
+b.disabled=true;b.textContent='Signing in\u2026';e.style.display='none';
+fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t.value})})
+.then(function(r){
+if(!r.ok)return r.json().then(function(j){throw new Error(j.error||'Login failed')});
+window.location.href='/';
+})
+.catch(function(err){
+e.textContent=err.message;e.style.display='block';
+b.disabled=false;b.textContent='Sign in';
+});
+};
+})();
+</script>
+</body>
+</html>`
+
+func (h *Handler) serveStandaloneLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Frame-Options", "DENY")
+	_, _ = w.Write([]byte(standaloneLoginHTML))
 }
 
 func (h *Handler) handleCatchAll(w http.ResponseWriter, r *http.Request) {
@@ -1798,8 +1847,33 @@ func (h *Handler) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// /login is always public — serve the SPA so it can render the login page.
+	// Serve embedded static assets (JS, CSS, images) without authentication.
+	// The login page itself needs these resources to render and function.
+	if h.spaFS != nil {
+		cleanPath := strings.TrimPrefix(r.URL.Path, "/")
+		if cleanPath != "" && !strings.Contains(cleanPath, "..") {
+			if f, err := h.spaFS.Open(cleanPath); err == nil {
+				stat, statErr := f.Stat()
+				if statErr == nil && !stat.IsDir() {
+					f.Close()
+					spaSecurityHeaders(w)
+					http.ServeFileFS(w, r, h.spaFS, cleanPath)
+					return
+				}
+				f.Close()
+			}
+		}
+	}
+
+	// /login is always public — serve a standalone login page that does not
+	// depend on the SPA JavaScript bundle.  The SPA's index.html is SSR'd with
+	// the dashboard route which immediately calls /api/instances, gets 401, and
+	// triggers an infinite redirect loop.  A minimal standalone page avoids this.
 	isLoginPage := r.URL.Path == "/login" || r.URL.Path == "/login/"
+	if isLoginPage {
+		h.serveStandaloneLogin(w, r)
+		return
+	}
 
 	// Proxied asset request (Referer or cookie based).
 	// C2/H1: check once — allow if either the platform session is valid OR the
@@ -1821,12 +1895,12 @@ func (h *Handler) handleCatchAll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Non-instance path: require platform session (except /login).
-	if !isLoginPage && !h.isAuthenticated(r) {
+	if !h.isAuthenticated(r) {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
 
-	// Serve the embedded SPA for all other paths.
+	// Serve the SPA index.html for all other paths (client-side routing).
 	if h.spaFS == nil {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return

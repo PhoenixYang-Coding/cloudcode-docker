@@ -175,9 +175,14 @@ async function request<T>(
   }
 
   // Global 401 handler: redirect to /login for browser sessions.
+  // Throw an error so callers can handle it. Only redirect if NOT already
+  // on /login to prevent infinite loops when the SPA serves the same
+  // index.html for all routes.
   if (res.status === 401 && typeof window !== "undefined") {
-    window.location.href = "/login";
-    return undefined as T;
+    if (window.location.pathname !== "/login") {
+      window.location.href = "/login";
+    }
+    throw new ApiResponseError(401, { error: "authentication required" });
   }
 
   const text = await res.text();

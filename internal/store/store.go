@@ -1,9 +1,10 @@
 package store
 
 import (
-"database/sql"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -21,9 +22,9 @@ type Instance struct {
 	ErrorMsg    string            `json:"error_msg"`
 	Port        int               `json:"port"`
 	WorkDir     string            `json:"work_dir"`
-	EnvVars     map[string]string `json:"env_vars"` // API keys, GH_TOKEN, etc.
-	MemoryMB    int               `json:"memory_mb"`  // 0 = unlimited
-	CPUCores    float64           `json:"cpu_cores"` // 0 = unlimited
+	EnvVars     map[string]string `json:"env_vars"`     // API keys, GH_TOKEN, etc.
+	MemoryMB    int               `json:"memory_mb"`    // 0 = unlimited
+	CPUCores    float64           `json:"cpu_cores"`    // 0 = unlimited
 	AccessToken string            `json:"access_token"` // per-instance Basic Auth password
 	CreatedAt   time.Time         `json:"created_at"`
 	UpdatedAt   time.Time         `json:"updated_at"`
@@ -54,22 +55,55 @@ func New(dataDir string) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(dataDir, "cloudcode.db")
+	if err := ensureWritable(dataDir, dbPath); err != nil {
+		return nil, err
+	}
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
 
 	// Enable WAL mode for better concurrent access
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		return nil, fmt.Errorf("set WAL mode: %w", err)
+	if err := setJournalMode(db, dbPath, "WAL"); err != nil {
+		log.Printf("WAL mode unavailable for %s: %v; falling back to DELETE journal mode", dbPath, err)
+		if fallbackErr := setJournalMode(db, dbPath, "DELETE"); fallbackErr != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("set journal mode: WAL failed (%v), DELETE failed (%w)", err, fallbackErr)
+		}
 	}
 
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	return s, nil
+}
+
+func ensureWritable(dataDir, dbPath string) error {
+	testFile, err := os.CreateTemp(dataDir, ".cloudcode-write-test-*")
+	if err != nil {
+		return fmt.Errorf("data dir %q is not writable: %w", dataDir, err)
+	}
+	testFile.Close()
+	if err := os.Remove(testFile.Name()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("cleanup write test file: %w", err)
+	}
+
+	file, err := os.OpenFile(dbPath, os.O_CREATE|os.O_RDWR, 0640)
+	if err != nil {
+		return fmt.Errorf("database path %q is not writable: %w", dbPath, err)
+	}
+	return file.Close()
+}
+
+func setJournalMode(db *sql.DB, dbPath, mode string) error {
+	if _, err := db.Exec("PRAGMA journal_mode=" + mode); err != nil {
+		return fmt.Errorf("%s for %s: %w", mode, dbPath, err)
+	}
+	return nil
 }
 
 func (s *Store) migrate() error {
